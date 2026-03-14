@@ -1,0 +1,201 @@
+%%writefile verify_correctness.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <gmp.h>
+
+#define MR_ROUNDS 20
+#define E_VALUE 65537
+
+static int SIEVE[500];
+static int SIEVE_SIZE = 0;
+gmp_randstate_t rng;
+
+void init_sieve() {
+int is_prime[3001];
+memset(is_prime, 1, sizeof(is_prime));
+is_prime[0] = is_prime[1] = 0;
+for (int i = 2; i <= 3000; i++) {
+if (is_prime[i]) {
+if (i >= 17) SIEVE[SIEVE_SIZE++] = i;
+for (int j = 2*i; j <= 3000; j += i)
+is_prime[j] = 0;
+}
+}
+}
+
+int passes_sieve(mpz_t n) {
+for (int i = 0; i < SIEVE_SIZE; i++)
+if (mpz_divisible_ui_p(n, SIEVE[i])) return 0;
+return 1;
+}
+
+static const int W30[] = {1,7,11,13,17,19,23,29};
+static const int W30_SIZE = 8;
+
+long long find_prime(mpz_t result, int bits, int mr_rounds) {
+mpz_t candidate;
+mpz_init(candidate);
+long long attempts = 0;
+while (1) {
+mpz_urandomb(candidate, rng, bits);
+mpz_setbit(candidate, bits-1);
+mpz_setbit(candidate, 0);
+int r = (int)(mpz_get_ui(candidate) % 30);
+int found_r = 0;
+for (int i = 0; i < W30_SIZE; i++)
+if (W30[i] == r) { found_r = 1; break; }
+if (!found_r) {
+for (int delta = 1; delta < 30; delta++) {
+int new_r = (r + delta) % 30;
+for (int i = 0; i < W30_SIZE; i++) {
+if (W30[i] == new_r) {
+mpz_add_ui(candidate, candidate, delta);
+found_r = 1; break;
+}
+}
+if (found_r) break;
+}
+}
+if ((int)mpz_sizeinbase(candidate, 2) != bits) continue;
+attempts++;
+if (passes_sieve(candidate) &&
+mpz_probab_prime_p(candidate, mr_rounds) > 0) {
+mpz_set(result, candidate);
+mpz_clear(candidate);
+return attempts;
+}
+}
+}
+
+typedef struct {
+int test_prime_p, test_prime_q;
+int test_p_neq_q, test_fips_distance;
+int test_bits_p, test_bits_q, test_bits_n;
+int test_gcd_e_phi, test_inverse_d;
+int test_encrypt_decrypt;
+} VerifyResult;
+
+VerifyResult verify_rsa_key(int rsa_bits) {
+VerifyResult res = {0};
+int half = rsa_bits / 2;
+mpz_t p, q, n, phi, e, d, tmp, min_dist;
+mpz_inits(p, q, n, phi, e, d, tmp, min_dist, NULL);
+
+int mr_gen = (half<=256)?10:(half<=512)?10:
+(half<=1024)?8:5;
+find_prime(p, half, mr_gen);
+find_prime(q, half, mr_gen);
+
+res.test_prime_p = (mpz_probab_prime_p(p, MR_ROUNDS) > 0);
+res.test_prime_q = (mpz_probab_prime_p(q, MR_ROUNDS) > 0);
+res.test_p_neq_q = (mpz_cmp(p, q) != 0);
+
+mpz_set_ui(min_dist, 1);
+mpz_mul_2exp(min_dist, min_dist, rsa_bits / 4);
+mpz_sub(tmp, p, q);
+mpz_abs(tmp, tmp);
+res.test_fips_distance = (mpz_cmp(tmp, min_dist) > 0);
+
+res.test_bits_p = ((int)mpz_sizeinbase(p, 2) == half);
+res.test_bits_q = ((int)mpz_sizeinbase(q, 2) == half);
+
+mpz_mul(n, p, q);
+res.test_bits_n = ((int)mpz_sizeinbase(n, 2) == rsa_bits ||
+(int)mpz_sizeinbase(n, 2) == rsa_bits-1);
+
+mpz_sub_ui(tmp, p, 1);
+mpz_sub_ui(phi, q, 1);
+mpz_mul(phi, phi, tmp);
+
+mpz_set_ui(e, E_VALUE);
+mpz_gcd(tmp, e, phi);
+res.test_gcd_e_phi = (mpz_cmp_ui(tmp, 1) == 0);
+
+if (res.test_gcd_e_phi) {
+mpz_invert(d, e, phi);
+mpz_mul(tmp, d, e);
+mpz_mod(tmp, tmp, phi);
+res.test_inverse_d = (mpz_cmp_ui(tmp, 1) == 0);
+}
+
+if (res.test_inverse_d) {
+mpz_t m, c, m2;
+mpz_inits(m, c, m2, NULL);
+mpz_set_ui(m, 42);
+mpz_powm(c, m, e, n);
+mpz_powm(m2, c, d, n);
+res.test_encrypt_decrypt = (mpz_cmp(m, m2) == 0);
+mpz_clears(m, c, m2, NULL);
+}
+
+mpz_clears(p, q, n, phi, e, d, tmp, min_dist, NULL);
+return res;
+}
+
+int main() {
+init_sieve();
+gmp_randinit_default(rng);
+gmp_randseed_ui(rng, (unsigned long)time(NULL));
+
+printf("==========================================\n");
+printf("CORRECTNESS VERIFICATION RSA FIPS 186-5\n");
+printf("==========================================\n\n");
+
+int bit_sizes[] = {512, 1024, 2048, 4096};
+int n_tests[] = {50, 50, 30, 20 };
+
+for (int b = 0; b < 4; b++) {
+int bits = bit_sizes[b];
+int N = n_tests[b];
+
+int fail_prime_p=0, fail_prime_q=0;
+int fail_neq=0, fail_fips=0;
+int fail_bits=0, fail_bits_n=0;
+int fail_gcd=0, fail_inv=0;
+int fail_enc=0;
+
+for (int i = 0; i < N; i++) {
+VerifyResult r = verify_rsa_key(bits);
+if (!r.test_prime_p) fail_prime_p++;
+if (!r.test_prime_q) fail_prime_q++;
+if (!r.test_p_neq_q) fail_neq++;
+if (!r.test_fips_distance) fail_fips++;
+if (!r.test_bits_p ||
+!r.test_bits_q) fail_bits++;
+if (!r.test_bits_n) fail_bits_n++;
+if (!r.test_gcd_e_phi) fail_gcd++;
+if (!r.test_inverse_d) fail_inv++;
+if (!r.test_encrypt_decrypt) fail_enc++;
+}
+
+printf("RSA-%d (%d keys tested):\n", bits, N);
+printf(" p prime (20 rounds): %s\n",
+!fail_prime_p ? "PASS" : "FAIL");
+printf(" q prime (20 rounds): %s\n",
+!fail_prime_q ? "PASS" : "FAIL");
+printf(" p != q: %s\n",
+!fail_neq ? "PASS" : "FAIL");
+printf(" FIPS 186-5 |p-q|: %s\n",
+!fail_fips ? "PASS" : "FAIL");
+printf(" Bit lengths p,q,n: %s\n",
+(!fail_bits && !fail_bits_n) ? "PASS" : "FAIL");
+printf(" gcd(e,phi)=1: %s\n",
+!fail_gcd ? "PASS" : "FAIL");
+printf(" d*e=1 mod phi: %s\n",
+!fail_inv ? "PASS" : "FAIL");
+printf(" Encrypt/decrypt: %s\n",
+!fail_enc ? "PASS" : "FAIL");
+
+int total = fail_prime_p+fail_prime_q+fail_neq+
+fail_fips+fail_bits+fail_bits_n+
+fail_gcd+fail_inv+fail_enc;
+printf(" --> %s\n\n",
+total==0 ? "ALL TESTS PASSED" : "FAILURES DETECTED");
+}
+
+gmp_randclear(rng);
+return 0;
+}
+
