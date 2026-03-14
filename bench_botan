@@ -1,0 +1,41 @@
+#include <iostream>
+#include <chrono>
+#include <cstdio>
+#include <botan/rsa.h>
+#include <botan/auto_rng.h>
+
+double get_time() {
+struct timespec ts;
+clock_gettime(CLOCK_MONOTONIC, &ts);
+return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+double bench_botan_rsa(int bits, int n_keys) {
+Botan::AutoSeeded_RNG rng;
+double total = 0;
+for (int i = 0; i < n_keys; i++) {
+double t0 = get_time();
+Botan::RSA_PrivateKey key(rng, bits);
+total += get_time() - t0;
+}
+return total / n_keys;
+}
+
+int main() {
+printf("================================\n");
+printf("BENCHMARK BOTAN RSA\n");
+printf("================================\n\n");
+
+// Botan rejects RSA-512 as insecure — starting from 1024
+int bits_list[] = {1024, 2048, 4096};
+int n_keys[] = {20, 10, 5 };
+
+for (int b = 0; b < 3; b++) {
+int bits = bits_list[b];
+int n = n_keys[b];
+double t = bench_botan_rsa(bits, n);
+printf("RSA-%d: %.4fs/key\n", bits, t);
+}
+return 0;
+}
+
