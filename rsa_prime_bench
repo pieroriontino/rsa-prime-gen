@@ -1,0 +1,128 @@
+%%writefile rsa_prime_bench.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <gmp.h>
+
+#define MR_ROUNDS_512 10
+#define MR_ROUNDS_1024 10
+#define MR_ROUNDS_2048 8
+#define MR_ROUNDS_4096 5
+#define MR_ROUNDS_8192 5
+
+static const int W30[] = {1,7,11,13,17,19,23,29};
+static const int W30_SIZE = 8;
+static int SIEVE[500];
+static int SIEVE_SIZE = 0;
+
+void init_sieve() {
+int is_prime[3001];
+memset(is_prime, 1, sizeof(is_prime));
+is_prime[0] = is_prime[1] = 0;
+for (int i = 2; i <= 3000; i++) {
+if (is_prime[i]) {
+if (i >= 17) SIEVE[SIEVE_SIZE++] = i;
+for (int j = 2*i; j <= 3000; j += i)
+is_prime[j] = 0;
+}
+}
+}
+
+double get_time() {
+struct timespec ts;
+clock_gettime(CLOCK_MONOTONIC, &ts);
+return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+gmp_randstate_t rng;
+
+int passes_sieve(mpz_t n) {
+for (int i = 0; i < SIEVE_SIZE; i++)
+if (mpz_divisible_ui_p(n, SIEVE[i])) return 0;
+return 1;
+}
+
+long long find_prime_standard(mpz_t result, int bits, int mr_rounds) {
+mpz_t candidate;
+mpz_init(candidate);
+long long attempts = 0;
+while (1) {
+mpz_urandomb(candidate, rng, bits);
+mpz_setbit(candidate, bits-1);
+mpz_setbit(candidate, 0);
+int r = (int)(mpz_get_ui(candidate) % 30);
+int found_r = 0;
+for (int i = 0; i < W30_SIZE; i++)
+if (W30[i] == r) { found_r = 1; break; }
+if (!found_r) {
+for (int delta = 1; delta < 30; delta++) {
+int new_r = (r + delta) % 30;
+for (int i = 0; i < W30_SIZE; i++) {
+if (W30[i] == new_r) {
+mpz_add_ui(candidate, candidate, delta);
+found_r = 1; break;
+}
+}
+if (found_r) break;
+}
+}
+if ((int)mpz_sizeinbase(candidate, 2) != bits) continue;
+attempts++;
+if (passes_sieve(candidate) &&
+mpz_probab_prime_p(candidate, mr_rounds) > 0) {
+mpz_set(result, candidate);
+mpz_clear(candidate);
+return attempts;
+}
+}
+}
+
+void benchmark(int rsa_bits, int n_keys) {
+int half = rsa_bits / 2;
+int mr_rounds;
+if (half <= 256) mr_rounds = MR_ROUNDS_512;
+else if (half <= 512) mr_rounds = MR_ROUNDS_1024;
+else if (half <= 1024) mr_rounds = MR_ROUNDS_2048;
+else if (half <= 2048) mr_rounds = MR_ROUNDS_4096;
+else mr_rounds = MR_ROUNDS_8192;
+
+mpz_t p, q;
+mpz_init(p); mpz_init(q);
+
+double t_start = get_time();
+long long total_att = 0;
+for (int i = 0; i < n_keys; i++) {
+total_att += find_prime_standard(p, half, mr_rounds);
+total_att += find_prime_standard(q, half, mr_rounds);
+}
+double t_total = get_time() - t_start;
+double t_per_key = t_total / n_keys;
+double att_avg = (double)total_att / (2.0 * n_keys);
+
+printf("RSA-%d: %.4fs/key %.1f att/prime\n",
+rsa_bits, t_per_key, att_avg);
+
+mpz_clear(p); mpz_clear(q);
+}
+
+int main() {
+init_sieve();
+gmp_randinit_default(rng);
+gmp_randseed_ui(rng, (unsigned long)time(NULL));
+
+printf("=================================\n");
+printf("BENCHMARK RSA PRIME GENERATION C\n");
+printf("=================================\n\n");
+printf("Sieve primes: %d\n\n", SIEVE_SIZE);
+
+benchmark(512, 100);
+benchmark(1024, 100);
+benchmark(2048, 50);
+benchmark(4096, 20);
+benchmark(8192, 10);
+
+gmp_randclear(rng);
+return 0;
+}
+
