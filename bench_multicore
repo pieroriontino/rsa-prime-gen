@@ -1,0 +1,245 @@
+%%writefile bench_multicore.c
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <pthread.h>
+#include <gmp.h>
+
+static int SIEVE[500];
+static int SIEVE_SIZE = 0;
+
+void init_sieve() {
+int is_prime[3001];
+memset(is_prime, 1, sizeof(is_prime));
+is_prime[0] = is_prime[1] = 0;
+for (int i = 2; i <= 3000; i++) {
+if (is_prime[i]) {
+if (i >= 17) SIEVE[SIEVE_SIZE++] = i;
+for (int j = 2*i; j <= 3000; j += i)
+is_prime[j] = 0;
+}
+}
+}
+
+double get_time() {
+struct timespec ts;
+clock_gettime(CLOCK_MONOTONIC, &ts);
+return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+static const int W30[] = {1,7,11,13,17,19,23,29};
+static const int W30_SIZE = 8;
+
+int passes_sieve(mpz_t n) {
+for (int i = 0; i < SIEVE_SIZE; i++)
+if (mpz_divisible_ui_p(n, SIEVE[i])) return 0;
+return 1;
+}
+
+typedef struct {
+int bits;
+int mr_rounds;
+int worker_id;
+mpz_t result;
+pthread_mutex_t *mutex;
+int *global_found;
+} WorkerArgs;
+
+void *thread_func(void *arg) {
+WorkerArgs *args = (WorkerArgs *)arg;
+
+gmp_randstate_t rng;
+gmp_randinit_default(rng);
+gmp_randseed_ui(rng,
+(unsigned long)time(NULL) + args->worker_id * 99991);
+
+mpz_t candidate;
+mpz_init(candidate);
+
+while (1) {
+pthread_mutex_lock(args->mutex);
+int done = *(args->global_found);
+pthread_mutex_unlock(args->mutex);
+if (done) break;
+
+mpz_urandomb(candidate, rng, args->bits);
+mpz_setbit(candidate, args->bits - 1);
+mpz_setbit(candidate, 0);
+
+int r = (int)(mpz_get_ui(candidate) % 30);
+int found_r = 0;
+for (int i = 0; i < W30_SIZE; i++)
+if (W30[i] == r) { found_r = 1; break; }
+if (!found_r) {
+for (int delta = 1; delta < 30; delta++) {
+int new_r = (r + delta) % 30;
+for (int i = 0; i < W30_SIZE; i++) {
+if (W30[i] == new_r) {
+mpz_add_ui(candidate, candidate, delta);
+found_r = 1; break;
+}
+}
+if (found_r) break;
+}
+}
+
+if ((int)mpz_sizeinbase(candidate, 2) != args->bits)
+continue;
+
+if (passes_sieve(candidate) &&
+mpz_probab_prime_p(candidate, args->mr_rounds) > 0) {
+pthread_mutex_lock(args->mutex);
+if (!*(args->global_found)) {
+*(args->global_found) = 1;
+mpz_set(args->result, candidate);
+}
+pthread_mutex_unlock(args->mutex);
+break;
+}
+}
+
+mpz_clear(candidate);
+gmp_randclear(rng);
+return NULL;
+}
+
+void find_prime_parallel(mpz_t result, int bits,
+int mr_rounds, int n_workers) {
+pthread_t threads[8];
+WorkerArgs args[8];
+pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+int global_found = 0;
+
+for (int i = 0; i < n_workers; i++) {
+args[i].bits = bits;
+args[i].mr_rounds = mr_rounds;
+args[i].worker_id = i;
+args[i].mutex = &mutex;
+args[i].global_found = &global_found;
+mpz_init(args[i].result);
+pthread_create(&threads[i], NULL, thread_func, &args[i]);
+}
+
+for (int i = 0; i < n_workers; i++)
+pthread_join(threads[i], NULL);
+
+for (int i = 0; i < n_workers; i++) {
+if (mpz_sgn(args[i].result) > 0) {
+mpz_set(result, args[i].result);
+break;
+}
+}
+
+for (int i = 0; i < n_workers; i++)
+mpz_clear(args[i].result);
+
+pthread_mutex_destroy(&mutex);
+}
+
+void find_prime_seq(mpz_t result, int bits, int mr_rounds) {
+gmp_randstate_t rng;
+gmp_randinit_default(rng);
+gmp_randseed_ui(rng, (unsigned long)time(NULL));
+
+mpz_t candidate;
+mpz_init(candidate);
+
+while (1) {
+mpz_urandomb(candidate, rng, bits);
+mpz_setbit(candidate, bits-1);
+mpz_setbit(candidate, 0);
+int r = (int)(mpz_get_ui(candidate) % 30);
+int found_r = 0;
+for (int i = 0; i < W30_SIZE; i++)
+if (W30[i] == r) { found_r = 1; break; }
+if (!found_r) {
+for (int delta = 1; delta < 30; delta++) {
+int new_r = (r + delta) % 30;
+for (int i = 0; i < W30_SIZE; i++) {
+if (W30[i] == new_r) {
+mpz_add_ui(candidate, candidate, delta);
+found_r = 1; break;
+}
+}
+if (found_r) break;
+}
+}
+if ((int)mpz_sizeinbase(candidate, 2) != bits) continue;
+if (passes_sieve(candidate) &&
+mpz_probab_prime_p(candidate, mr_rounds) > 0) {
+mpz_set(result, candidate);
+break;
+}
+}
+
+mpz_clear(candidate);
+gmp_randclear(rng);
+}
+
+void benchmark_parallel(int rsa_bits, int n_keys) {
+int half = rsa_bits / 2;
+int mr = (half<=256)?10:(half<=512)?10:
+(half<=1024)?8:5;
+
+mpz_t p, q;
+mpz_init(p); mpz_init(q);
+
+/* Sequenziale */
+double t0 = get_time();
+for (int i = 0; i < n_keys; i++) {
+find_prime_seq(p, half, mr);
+find_prime_seq(q, half, mr);
+}
+double t_seq = (get_time() - t0) / n_keys;
+
+/* 2 worker */
+t0 = get_time();
+for (int i = 0; i < n_keys; i++) {
+find_prime_parallel(p, half, mr, 2);
+find_prime_parallel(q, half, mr, 2);
+}
+double t_2w = (get_time() - t0) / n_keys;
+
+/* 4 worker */
+t0 = get_time();
+for (int i = 0; i < n_keys; i++) {
+find_prime_parallel(p, half, mr, 4);
+find_prime_parallel(q, half, mr, 4);
+}
+double t_4w = (get_time() - t0) / n_keys;
+
+printf("RSA-%d:\n", rsa_bits);
+printf(" seq: %.4fs (1.00x)\n", t_seq);
+printf(" 2 worker: %.4fs (%.2fx)\n", t_2w, t_seq/t_2w);
+printf(" 4 worker: %.4fs (%.2fx)\n", t_4w, t_seq/t_4w);
+printf("\n");
+
+mpz_clear(p); mpz_clear(q);
+}
+
+int main() {
+init_sieve();
+
+printf("==========================================\n");
+printf("BENCHMARK MULTI-CORE RSA PRIME GENERATION\n");
+printf("==========================================\n\n");
+
+int cores = 0;
+FILE *f = fopen("/proc/cpuinfo", "r");
+if (f) {
+char line[256];
+while (fgets(line, sizeof(line), f))
+if (strncmp(line, "processor", 9) == 0) cores++;
+fclose(f);
+}
+printf("Available cores: %d\n\n", cores);
+
+benchmark_parallel(512, 30);
+benchmark_parallel(1024, 20);
+benchmark_parallel(2048, 10);
+benchmark_parallel(4096, 5);
+
+return 0;
+}
+
