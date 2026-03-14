@@ -31,6 +31,8 @@ apt-get install libgmp-dev
 gcc -O3 -o rsa_prime_bench rsa_prime_bench.c -lgmp
 ./rsa_prime_bench
 
+
+
 ## Related Paper
 
 Fast RSA Prime Generation via Wheel Factorization
