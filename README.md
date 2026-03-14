@@ -30,3 +30,10 @@ All keys verified against FIPS 186-5:
 apt-get install libgmp-dev
 gcc -O3 -o rsa_prime_bench rsa_prime_bench.c -lgmp
 ./rsa_prime_bench
+Related Paper
+Fast RSA Prime Generation via Wheel Factorization
+and Prime Distance Structure in Twin Prime Gaps
+[IACR ePrint link — coming soon]
+License
+© 2026 [Piero Riontino - email: pieroriontino@pec.it]. All rights reserved.
+Commercial use requires explicit written permission.
